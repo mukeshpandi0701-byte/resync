@@ -5,14 +5,19 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import { analyzeMediaWithGemini } from './gemini.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '../data');
 const file = path.join(dataDir, 'store.json');
 fs.mkdirSync(dataDir, { recursive: true });
 
+
+let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, analyses: {} };
+store.analyses = store.analyses || {};
 let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, reports: {} };
 store.reports = store.reports || {};
+
 
 // Seed data if none exists
 if (Object.keys(store.inspections).length === 0) {
@@ -234,7 +239,7 @@ app.patch('/api/conflicts/:id', (req, res) => {
 
 app.get('/api/conflicts', (req, res) => res.json(Object.values(store.conflicts)));
 
-// Evidence
+// Evidence handling
 const evidenceDir = path.join(dataDir, 'evidence');
 fs.mkdirSync(evidenceDir, { recursive: true });
 
@@ -267,6 +272,139 @@ app.post('/api/evidence/upload', upload.single('file'), (req, res) => {
   };
   
   res.json({ ok: true, evidence: evidenceRecord });
+});
+
+// Helper to safely update store.analyses preserving concurrent changes
+function updateAnalysis(evidenceId, updateData) {
+  let latestStore = { inspections: {}, conflicts: {}, analyses: {} };
+  if (fs.existsSync(file)) {
+    try {
+      latestStore = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      latestStore = store;
+    }
+  } else {
+    latestStore = store;
+  }
+
+  latestStore.inspections = latestStore.inspections || {};
+  latestStore.conflicts = latestStore.conflicts || {};
+  latestStore.analyses = latestStore.analyses || {};
+
+  const current = latestStore.analyses[evidenceId] || {
+    evidenceId,
+    status: 'pending',
+    findings: [],
+    confidenceScore: 0,
+    createdAt: Date.now()
+  };
+
+  const nextRecord = typeof updateData === 'function' ? updateData(current) : { ...current, ...updateData };
+  latestStore.analyses[evidenceId] = { ...nextRecord, updatedAt: Date.now() };
+
+  store = latestStore;
+  persist();
+  return store.analyses[evidenceId];
+}
+
+// Media Analysis Endpoints
+app.post('/api/evidence/:id/analyze', (req, res) => {
+  const id = req.params.id;
+  const filePath = path.join(evidenceDir, id);
+
+  if (!fs.existsSync(filePath)) {
+    const record = updateAnalysis(id, {
+      status: 'failed',
+      error: 'Evidence file not found on server'
+    });
+    return res.status(202).json({
+      status: 'failed',
+      jobId: id,
+      evidenceId: id,
+      error: record.error
+    });
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    const record = updateAnalysis(id, {
+      status: 'failed',
+      error: 'Gemini API key is not configured on the server.'
+    });
+    return res.status(202).json({
+      status: 'failed',
+      jobId: id,
+      evidenceId: id,
+      error: record.error
+    });
+  }
+
+  updateAnalysis(id, {
+    status: 'analyzing',
+    findings: [],
+    confidenceScore: 0,
+    error: null
+  });
+
+  const ext = path.extname(id).toLowerCase();
+  let mimeType = 'image/jpeg';
+  if (ext === '.png') mimeType = 'image/png';
+  else if (ext === '.webp') mimeType = 'image/webp';
+  else if (ext === '.gif') mimeType = 'image/gif';
+
+  // Trigger async background execution
+  (async () => {
+    try {
+      const result = await analyzeMediaWithGemini({ filePath, mimeType });
+      if (result.success) {
+        updateAnalysis(id, {
+          status: 'complete',
+          findings: result.findings,
+          confidenceScore: result.confidenceScore,
+          error: null
+        });
+      } else {
+        updateAnalysis(id, {
+          status: 'failed',
+          findings: [],
+          confidenceScore: 0,
+          error: result.error || 'Analysis failed'
+        });
+      }
+    } catch (err) {
+      updateAnalysis(id, {
+        status: 'failed',
+        findings: [],
+        confidenceScore: 0,
+        error: 'Unexpected analysis error'
+      });
+    }
+  })();
+
+  res.status(202).json({
+    status: 'analyzing',
+    jobId: id,
+    evidenceId: id
+  });
+});
+
+app.get('/api/evidence/:id/analysis', (req, res) => {
+  const id = req.params.id;
+  const record = (store.analyses || {})[id];
+  if (!record) {
+    return res.json({
+      evidenceId: id,
+      status: 'pending',
+      findings: [],
+      confidenceScore: 0
+    });
+  }
+  res.json({
+    evidenceId: id,
+    status: record.status,
+    findings: record.findings || [],
+    confidenceScore: typeof record.confidenceScore === 'number' ? record.confidenceScore : 0,
+    ...(record.error ? { error: record.error } : {})
+  });
 });
 
 app.listen(4000, () => console.log('ReSync API running on http://localhost:4000'));

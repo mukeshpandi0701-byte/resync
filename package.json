@@ -1,11 +1,17 @@
 {
   "name": "resync-platform",
   "private": true,
-  "workspaces": ["client", "server"],
+  "workspaces": [
+    "client",
+    "server"
+  ],
   "scripts": {
     "dev": "concurrently \"npm run dev -w client\" \"npm run dev -w server\"",
     "build": "npm run build -w client",
     "start": "npm run start -w server"
   },
-  "devDependencies": {"concurrently":"^9.1.2"}
+  "devDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.2.9",
+    "concurrently": "^9.1.2"
+  }
 }
