@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useContext, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { RefreshCw, ClipboardCheck, CloudOff, Camera, History, Upload, CheckCircle2, ShieldCheck, RotateCcw, AlertTriangle } from 'lucide-react';
+import { RefreshCw, ClipboardCheck, CloudOff, Camera, History, Upload, CheckCircle2, ShieldCheck, RotateCcw, AlertTriangle, FileText, Download, Eye } from 'lucide-react';
 import { db } from '../db';
 import { AppContext } from '../App';
 
@@ -106,16 +106,15 @@ export default function InspectionDetail() {
 
   async function syncEvidence() {
     try {
-      // Fetch evidence items queued for upload (status: pending)
       const pendingEv = await db.evidence.where('status').equals('pending').toArray();
       for (const ev of pendingEv) {
-        if (!ev.blob) continue; // Safety check
+        if (!ev.blob) continue;
         
         const formData = new FormData();
         formData.append('file', ev.blob, ev.filename);
         formData.append('inspectionId', ev.inspectionId);
         formData.append('actorId', ev.actorId);
-        formData.append('evidenceId', ev.id); // Prevent duplicate generation on server
+        formData.append('evidenceId', ev.id);
         
         try {
           const r = await fetch(API + '/evidence/upload', { method: 'POST', body: formData });
@@ -124,7 +123,6 @@ export default function InspectionDetail() {
           if (r.ok && data.ok) {
             await db.evidence.update(ev.id, { status: 'uploaded', serverUrl: data.evidence.url });
             
-            // Update local inspection evidence reference status to uploaded
             setInspection(prev => {
               if (!prev) return prev;
               const updatedEvidence = (prev.evidence || []).map(e => e.id === ev.id ? { ...e, status: 'uploaded' } : e);
@@ -133,7 +131,6 @@ export default function InspectionDetail() {
               return next;
             });
           } else {
-            // Server error — mark failed in Dexie (Blob remains preserved)
             await db.evidence.update(ev.id, { status: 'failed' });
             setInspection(prev => {
               if (!prev) return prev;
@@ -144,7 +141,6 @@ export default function InspectionDetail() {
             });
           }
         } catch (uploadErr) {
-          // Network error — mark status failed without dropping local Blob
           await db.evidence.update(ev.id, { status: 'failed' });
           setInspection(prev => {
             if (!prev) return prev;
@@ -174,7 +170,6 @@ export default function InspectionDetail() {
     setInspection(withHistory);
     await db.inspections.put(withHistory);
     
-    // Create change record. Base version is original version before edit (for conflict detection)
     await db.changes.add({
       id: crypto.randomUUID(),
       inspectionId: withHistory.id,
@@ -217,7 +212,7 @@ export default function InspectionDetail() {
         
         if (data.conflict) {
           await db.changes.update(c.id, { status: 'conflict' });
-          setMessage('Conflict detected — review required on Dashboard');
+          setMessage('Conflict detected — review required');
         } else {
           await db.changes.update(c.id, { status: 'synced' });
           if (data.inspection) {
@@ -235,62 +230,139 @@ export default function InspectionDetail() {
     }
   }
 
-  if (!inspection) return <div className="loading">Loading ReSync…</div>;
+  if (!inspection) return <div style={{ minHeight: '50vh', display: 'grid', placeItems: 'center', color: '#697386' }}>Loading Inspection…</div>;
 
   return (
-    <div className="inspection-detail">
-      <section className="hero">
+    <div className="inspection-detail-page">
+      <div className="page-title-row">
         <div>
-          <p className="eyebrow">INSPECTION</p>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#D92F45', letterSpacing: '0.05em', marginBottom: 4 }}>INSPECTION DETAIL</div>
           <h1>{inspection.title}</h1>
-          <p className="muted">{inspection.site}</p>
+          <p style={{ fontSize: 13, color: '#697386' }}>{inspection.site}</p>
         </div>
-        <button className="sync" onClick={sync}>
-          <RefreshCw size={17} className={syncing ? 'spin' : ''} />
+        <button className="btn-primary" onClick={sync}>
+          <RefreshCw size={16} className={syncing ? 'spin' : ''} />
           {syncing ? 'Syncing…' : 'Sync now'}
         </button>
-      </section>
+      </div>
 
-      {message && <div className="notice"><ShieldCheck size={17} />{message}</div>}
+      {message && (
+        <div className="notice-banner">
+          <ShieldCheck size={16} /> {message}
+        </div>
+      )}
 
-      <div className="grid">
-        <section className="card checklist">
-          <div className="cardhead">
+      <div style={{ display: 'grid', gridTemplateColumns: '2.4fr 1fr', gap: 20 }}>
+        {/* Left Column: Safety Checklist */}
+        <div className="card">
+          <div className="card-header">
             <div>
-              <h2><ClipboardCheck /> Safety checklist</h2>
-              <p>Changes are stored locally first.</p>
+              <h3 className="card-title">
+                <ClipboardCheck size={18} /> Safety Checklist
+              </h3>
+              <p style={{ fontSize: 12, color: '#697386', marginTop: 2 }}>Changes are saved locally first.</p>
             </div>
-            <span className="local"><CloudOff size={14} /> Local-first</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: '#3285E8', background: '#EBF3FC', padding: '4px 10px', borderRadius: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <CloudOff size={12} /> Local-first
+            </span>
           </div>
-          {inspection.checklist.map(c => (
-            <div className="check" key={c.id}>
-              <span>{c.label}</span>
-              <div>
-                <button 
-                  className={c.value === 'PASS' ? 'yes active' : 'yes'} 
-                  onClick={() => updateCheck(c.id, 'PASS')}>PASS</button>
-                <button 
-                  className={c.value === 'FAIL' ? 'no active' : 'no'} 
-                  onClick={() => updateCheck(c.id, 'FAIL')}>FAIL</button>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
+            {inspection.checklist?.map(c => (
+              <div key={c.id} style={{ padding: '14px 16px', background: '#FFF7F5', border: '1px solid #E8E3E1', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>{c.label}</span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button 
+                    onClick={() => updateCheck(c.id, 'PASS')}
+                    style={{
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '6px 14px',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      background: c.value === 'PASS' ? '#18A96B' : '#E8F8F0',
+                      color: c.value === 'PASS' ? '#FFFFFF' : '#18A96B'
+                    }}
+                  >
+                    PASS
+                  </button>
+                  <button 
+                    onClick={() => updateCheck(c.id, 'FAIL')}
+                    style={{
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '6px 14px',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      background: c.value === 'FAIL' ? '#D92F45' : '#FCEBEC',
+                      color: c.value === 'FAIL' ? '#FFFFFF' : '#D92F45'
+                    }}
+                  >
+                    FAIL
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Inspector Notes Section */}
+          <div style={{ marginTop: 28, paddingTop: 20, borderTop: '1px solid #E8E3E1' }}>
+            <h3 className="card-title" style={{ fontSize: 15, marginBottom: 12 }}>Inspector Notes</h3>
+            <textarea 
+              value={inspection.notes || ''} 
+              onChange={updateNotes} 
+              placeholder="Record observations, measurements, or follow-up notes…" 
+              style={{
+                width: '100%',
+                height: 100,
+                padding: 12,
+                borderRadius: 8,
+                border: '1px solid #E8E3E1',
+                background: '#FCFAF8',
+                fontSize: 13,
+                outline: 'none',
+                resize: 'vertical'
+              }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, fontSize: 12, color: '#697386' }}>
+              <span>{online ? 'Connected — sync is available' : 'No connection — safely working offline'}</span>
+              <button className="btn-secondary" onClick={() => save({ ...inspection }, 'manual checkpoint')}>
+                <CheckCircle2 size={14} /> Save checkpoint
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Sidebar */}
+        <aside style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <div className="card">
+            <h3 className="card-title" style={{ fontSize: 14, marginBottom: 14 }}>
+              <History size={16} /> Inspection State
+            </h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: 8, borderBottom: '1px solid #E8E3E1' }}>
+                <span style={{ color: '#697386' }}>Local version</span>
+                <span style={{ fontWeight: 800 }}>v{inspection.version}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: 8, borderBottom: '1px solid #E8E3E1' }}>
+                <span style={{ color: '#697386' }}>Audit events</span>
+                <span style={{ fontWeight: 800 }}>{inspection.history?.length || 0}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: 8 }}>
+                <span style={{ color: '#697386' }}>Evidence items</span>
+                <span style={{ fontWeight: 800 }}>{inspection.evidence?.length || 0}</span>
               </div>
             </div>
-          ))}
-        </section>
-
-        <aside className="side">
-          <section className="card">
-            <h2><History /> Inspection state</h2>
-            <div className="metric"><b>{inspection.version}</b><span>Local version</span></div>
-            <div className="metric"><b>{inspection.history?.length || 0}</b><span>Audit events</span></div>
-            <div className="metric"><b>{inspection.evidence?.length || 0}</b><span>Evidence items</span></div>
 
             {/* Audit History Timeline */}
-            <div style={{ marginTop: '16px', borderTop: '1px solid #292031', paddingTop: '12px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#f8fafc' }}>Audit History</span>
-                <span className="tiny muted">{inspection.history?.length || 0} events</span>
+            <div style={{ marginTop: 16, borderTop: '1px solid #E8E3E1', paddingTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: '#182235' }}>Audit Trail</span>
+                <span style={{ fontSize: 11, color: '#697386' }}>{inspection.history?.length || 0} events</span>
               </div>
-              <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {(inspection.history || [])
                   .slice()
                   .sort((a, b) => a.at - b.at)
@@ -300,27 +372,22 @@ export default function InspectionDetail() {
                       <div
                         key={idx}
                         style={{
-                          padding: '8px 10px',
-                          borderRadius: '8px',
-                          background: isConflict ? '#291519' : '#100a17',
-                          border: isConflict ? '1px solid #EF4444' : '1px solid #292031',
-                          fontSize: '12px'
+                          padding: '6px 10px',
+                          borderRadius: 6,
+                          background: isConflict ? '#FCEBEC' : '#FFF7F5',
+                          border: '1px solid #E8E3E1',
+                          fontSize: 11
                         }}
                       >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                          <span style={{ fontWeight: 'bold', color: isConflict ? '#fca5a5' : '#f8fafc' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                          <span style={{ fontWeight: 700, color: isConflict ? '#D92F45' : '#182235' }}>
                             {evt.actor || 'Inspector'}
                           </span>
-                          <span style={{ fontSize: '10px', color: isConflict ? '#F59E0B' : '#B1A8C2', border: '1px solid #3a2b4e', borderRadius: '4px', padding: '1px 5px' }}>
+                          <span style={{ fontSize: 10, color: '#697386' }}>
                             v{evt.version}
                           </span>
                         </div>
-                        <div style={{ color: '#f8fafc', marginBottom: '4px', wordBreak: 'break-word' }}>
-                          {evt.action}
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#a99db9' }}>
-                          {new Date(evt.at).toLocaleString()}
-                        </div>
+                        <div style={{ color: '#182235' }}>{evt.action}</div>
                       </div>
                     );
                   })}
@@ -328,31 +395,31 @@ export default function InspectionDetail() {
             </div>
 
             {/* Report Request Controls */}
-            <div style={{ marginTop: '16px', borderTop: '1px solid #292031', paddingTop: '12px' }}>
-              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#f8fafc', display: 'block', marginBottom: '8px' }}>
+            <div style={{ marginTop: 16, borderTop: '1px solid #E8E3E1', paddingTop: 12 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: '#182235', display: 'block', marginBottom: 8 }}>
                 Inspection Report
               </span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                 <select
                   value={reportFormat}
                   onChange={e => setReportFormat(e.target.value)}
                   style={{
-                    background: '#0d0814',
-                    color: '#f8fafc',
-                    border: '1px solid #30243d',
-                    borderRadius: '8px',
-                    padding: '8px 10px',
-                    fontSize: '12px',
+                    background: '#FCFAF8',
+                    color: '#182235',
+                    border: '1px solid #E8E3E1',
+                    borderRadius: 6,
+                    padding: '6px 8px',
+                    fontSize: 12,
                     outline: 'none',
-                    flex: '1'
+                    flex: 1
                   }}
                 >
                   <option value="JSON">JSON (Supported)</option>
                   <option value="PDF">PDF (NOT VERIFIED)</option>
                 </select>
                 <button
-                  className="upload"
-                  style={{ width: 'auto', padding: '8px 14px', fontSize: '12px' }}
+                  className="btn-outline"
+                  style={{ padding: '6px 12px', fontSize: 12 }}
                   disabled={generatingReport}
                   onClick={handleGenerateReport}
                 >
@@ -361,120 +428,73 @@ export default function InspectionDetail() {
               </div>
 
               {reportStatus && (
-                <div style={{ fontSize: '11px', color: reportStatus.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac', marginBottom: '6px' }}>
+                <div style={{ fontSize: 11, color: reportStatus.includes('NOT VERIFIED') ? '#E6A21A' : '#18A96B', marginBottom: 6 }}>
                   {reportStatus}
                 </div>
               )}
 
               {latestReport && (
-                <div style={{ padding: '8px 10px', background: '#100a17', border: '1px solid #292031', borderRadius: '8px', fontSize: '12px', marginTop: '6px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                    <span style={{ color: '#f8fafc', fontWeight: 'bold' }}>Report #{latestReport.id.slice(0, 8)}</span>
-                    <span style={{ color: latestReport.status?.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac', fontSize: '11px' }}>
-                      {latestReport.format}
-                    </span>
-                  </div>
-                  <div style={{ color: '#a99db9', fontSize: '10px', marginBottom: '6px' }}>
-                    {new Date(latestReport.generatedAt).toLocaleString()}
-                  </div>
-                  <button
-                    style={{
-                      background: '#241537',
-                      border: '1px solid #4b3565',
-                      color: '#f8fafc',
-                      borderRadius: '6px',
-                      padding: '5px 10px',
-                      fontSize: '11px',
-                      cursor: 'pointer',
-                      width: '100%'
-                    }}
-                    onClick={() => setShowReportModal(true)}
-                  >
-                    View Report Metadata & Data
-                  </button>
-                </div>
+                <button
+                  className="btn-secondary"
+                  style={{ width: '100%', justifyContent: 'center', fontSize: 11, padding: '6px' }}
+                  onClick={() => setShowReportModal(true)}
+                >
+                  View Report Metadata ({latestReport.format})
+                </button>
               )}
             </div>
-          </section>
+          </div>
 
-          <section className="card">
-            <h2><Camera /> Evidence</h2>
+          <div className="card">
+            <h3 className="card-title" style={{ fontSize: 14, marginBottom: 14 }}>
+              <Camera size={16} /> Photo Evidence
+            </h3>
             <input 
               type="file" 
               accept="image/*,video/*" 
               capture="environment" 
               ref={fileInputRef} 
-              style={{display:'none'}} 
+              style={{ display: 'none' }} 
               onChange={handleFileSelect} 
             />
-            <button className="upload" onClick={() => fileInputRef.current?.click()}>
-              <Upload size={16} /> Add photo evidence
+            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center' }} onClick={() => fileInputRef.current?.click()}>
+              <Upload size={14} /> Add photo evidence
             </button>
-            <p className="tiny">Photos are stored offline in local storage and synced automatically.</p>
+            <p style={{ fontSize: 11, color: '#697386', marginTop: 8, marginBottom: 12 }}>
+              Photos are stored offline in local storage and synced automatically.
+            </p>
             {inspection.evidence?.map(e => (
-              <div key={e.id} style={{ fontSize: '12px', marginTop: '6px', color: '#B1A8C2', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span>📎 {e.filename} <small style={{ color: e.status === 'uploaded' ? '#86efac' : (e.status === 'failed' ? '#fca5a5' : '#fde047') }}>({e.status})</small></span>
+              <div key={e.id} style={{ fontSize: 12, marginTop: 6, color: '#182235', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', background: '#FFF7F5', border: '1px solid #E8E3E1', borderRadius: 6 }}>
+                <span>📎 {e.filename} <small style={{ color: e.status === 'uploaded' ? '#18A96B' : (e.status === 'failed' ? '#D92F45' : '#E6A21A') }}>({e.status})</small></span>
                 {e.status === 'failed' && (
                   <button 
                     onClick={() => retryEvidence(e.id)} 
-                    style={{ border: '0', background: '#291519', color: '#fca5a5', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontSize: '10px', display: 'flex', alignItems: 'center', gap: '3px' }}
+                    style={{ border: 0, background: '#FCEBEC', color: '#D92F45', padding: '2px 6px', borderRadius: 4, cursor: 'pointer', fontSize: 10, display: 'flex', alignItems: 'center', gap: 3, fontWeight: 700 }}
                   >
                     <RotateCcw size={10} /> Retry
                   </button>
                 )}
               </div>
             ))}
-          </section>
+          </div>
         </aside>
       </div>
 
-      <section className="card notes">
-        <h2>Inspector notes</h2>
-        <textarea 
-          value={inspection.notes} 
-          onChange={updateNotes} 
-          placeholder="Record observations, measurements, or follow-up notes…" 
-        />
-        <div className="bottom">
-          <span>{online ? 'Connected — sync is available' : 'No connection — safely working offline'}</span>
-          <button onClick={() => save({ ...inspection }, 'manual checkpoint')}>
-            <CheckCircle2 size={16} /> Save checkpoint
-          </button>
-        </div>
-      </section>
-
       {showReportModal && latestReport && (
-        <div className="overlay" onClick={() => setShowReportModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '85vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h2>Inspection Report ({latestReport.format})</h2>
-              <button
-                style={{ background: 'transparent', border: 0, color: '#f8fafc', fontSize: '18px', cursor: 'pointer' }}
-                onClick={() => setShowReportModal(false)}
-              >
-                ✕
-              </button>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(24, 34, 53, 0.6)', backdropFilter: 'blur(4px)', display: 'grid', placeItems: 'center', zIndex: 100, padding: 20 }} onClick={() => setShowReportModal(false)}>
+          <div className="card" onClick={e => e.stopPropagation()} style={{ width: 'min(580px, 100%)', maxHeight: '85vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 800 }}>Inspection Report ({latestReport.format})</h2>
+              <button style={{ background: 'none', border: 0, fontSize: 18, cursor: 'pointer', color: '#182235' }} onClick={() => setShowReportModal(false)}>✕</button>
             </div>
-            <p className="tiny" style={{ color: latestReport.status?.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac' }}>
+            <p style={{ fontSize: 12, color: latestReport.status?.includes('NOT VERIFIED') ? '#E6A21A' : '#18A96B', marginBottom: 6 }}>
               Status: {latestReport.status}
             </p>
-            <p className="tiny muted">
-              Generated: {new Date(latestReport.generatedAt).toLocaleString()} • Inspection ID: {latestReport.inspectionId}
-            </p>
-            <pre style={{
-              background: '#0d0814',
-              padding: '12px',
-              borderRadius: '8px',
-              border: '1px solid #30243d',
-              color: '#f8fafc',
-              fontSize: '11px',
-              overflowX: 'auto',
-              maxHeight: '350px'
-            }}>
+            <pre style={{ background: '#FCFAF8', padding: 12, borderRadius: 8, border: '1px solid #E8E3E1', fontSize: 11, overflowX: 'auto', maxHeight: 350 }}>
               {JSON.stringify(latestReport.data || latestReport, null, 2)}
             </pre>
-            <div className="actions" style={{ marginTop: '16px', justifyContent: 'flex-end' }}>
-              <button onClick={() => setShowReportModal(false)}>Close</button>
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn-secondary" onClick={() => setShowReportModal(false)}>Close</button>
             </div>
           </div>
         </div>

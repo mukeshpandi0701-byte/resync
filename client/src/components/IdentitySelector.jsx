@@ -10,18 +10,21 @@ export default function IdentitySelector() {
   };
 
   return (
-    <div className="identity-selector" style={{display: 'flex', gap: '8px', alignItems: 'center'}}>
-      <span style={{fontSize: '12px', color: '#B1A8C2'}}>USER:</span>
+    <div className="identity-selector" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+      <span style={{ fontSize: '12px', fontWeight: 600, color: '#697386' }}>ROLE:</span>
       <select 
         value={actor} 
         onChange={handleSwitch}
         style={{
-          background: '#1E1B29', 
-          color: '#F8FAFC', 
-          border: '1px solid #7C3AED',
-          padding: '4px 8px',
-          borderRadius: '4px',
-          outline: 'none'
+          background: '#FCFAF8', 
+          color: '#182235', 
+          border: '1px solid #D92F45',
+          padding: '4px 10px',
+          borderRadius: '6px',
+          fontWeight: 600,
+          fontSize: '12px',
+          outline: 'none',
+          cursor: 'pointer'
         }}
       >
         <option value="Inspector A">Inspector A</option>

@@ -1,19 +1,37 @@
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { Wifi, WifiOff } from 'lucide-react';
-import IdentitySelector from './components/IdentitySelector';
-import InspectorDashboard from './pages/InspectorDashboard';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import Sidebar from './components/Sidebar';
+import Header from './components/Header';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import Inspections from './pages/Inspections';
 import InspectionDetail from './pages/InspectionDetail';
-import SupervisorDashboard from './pages/SupervisorDashboard';
+import MediaAnalysis from './pages/MediaAnalysis';
+import AuditHistory from './pages/AuditHistory';
 import ConflictDetail from './pages/ConflictDetail';
+import Settings from './pages/Settings';
 import { db, seed } from './db';
 import './styles.css';
 
 export const AppContext = React.createContext();
 
+function AppShell({ children }) {
+  return (
+    <div className="app-layout">
+      <Sidebar />
+      <div className="main-wrapper">
+        <Header />
+        <main className="content-area">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [online, setOnline] = useState(navigator.onLine);
-  const [actor, setActor] = useState(localStorage.getItem('resync_actor') || 'Inspector A');
+  const [actor, setActor] = useState(localStorage.getItem('resync_actor') || 'Supervisor');
   const [pendingSync, setPendingSync] = useState(0);
 
   useEffect(() => {
@@ -30,11 +48,14 @@ export default function App() {
     initDb();
 
     const updatePending = async () => {
-      const count = await db.changes.where('status').equals('pending').count();
-      setPendingSync(count);
+      try {
+        const count = await db.changes.where('status').equals('pending').count();
+        setPendingSync(count);
+      } catch (e) {
+        // Safe catch
+      }
     };
     
-    // Poll or hook into Dexie for simplicity in this demo
     updatePending();
     const interval = setInterval(updatePending, 2000);
 
@@ -53,40 +74,25 @@ export default function App() {
   return (
     <AppContext.Provider value={{ online, actor, setActor, pendingSync }}>
       <BrowserRouter>
-        <div className="app">
-          <header>
-            <div className="brand">
-              <div className="logo">↻</div>
-              <div><b>ReSync</b><span>Field Inspection Platform</span></div>
-            </div>
-            
-            <IdentitySelector />
+        <Routes>
+          {/* Standalone Login Route */}
+          <Route path="/login" element={<Login />} />
 
-            <div className="nav-links">
-              {actor === 'Supervisor' ? (
-                <Link to="/supervisor">Dashboard</Link>
-              ) : (
-                <Link to="/inspections">My Inspections</Link>
-              )}
-            </div>
+          {/* Authenticated Application Shell Routes */}
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/supervisor" element={<Navigate to="/dashboard" replace />} />
 
-            <div className={'net ' + (online ? 'online' : 'offline')}>
-              {online ? <Wifi size={16} /> : <WifiOff size={16} />}
-              {online ? 'Online' : 'Offline'}
-              {pendingSync > 0 && <span className="sync-badge">{pendingSync}</span>}
-            </div>
-          </header>
-          
-          <main>
-            <Routes>
-              <Route path="/" element={<Navigate to={actor === 'Supervisor' ? '/supervisor' : '/inspections'} />} />
-              <Route path="/inspections" element={<InspectorDashboard />} />
-              <Route path="/inspections/:id" element={<InspectionDetail />} />
-              <Route path="/supervisor" element={<SupervisorDashboard />} />
-              <Route path="/conflicts/:id" element={<ConflictDetail />} />
-            </Routes>
-          </main>
-        </div>
+          <Route path="/dashboard" element={<AppShell><Dashboard /></AppShell>} />
+          <Route path="/inspections" element={<AppShell><Inspections /></AppShell>} />
+          <Route path="/inspections/:id" element={<AppShell><InspectionDetail /></AppShell>} />
+          <Route path="/media-analysis" element={<AppShell><MediaAnalysis /></AppShell>} />
+          <Route path="/audit-history" element={<AppShell><AuditHistory /></AppShell>} />
+          <Route path="/conflicts/:id" element={<AppShell><ConflictDetail /></AppShell>} />
+          <Route path="/settings" element={<AppShell><Settings /></AppShell>} />
+
+          {/* Catch-all fallback */}
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
       </BrowserRouter>
     </AppContext.Provider>
   );
