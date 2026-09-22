@@ -167,9 +167,9 @@ app.get('/api/reports/:id', (req, res) => {
 
 app.post('/api/sync', (req, res) => {
   const { change } = req.body || {};
-  if (!change?.payload) return res.status(400).json({ error: 'Invalid change' });
+  const incoming = change?.payload || req.body?.payload || (req.body?.id ? req.body : null);
+  if (!incoming?.id) return res.status(400).json({ error: 'Invalid change' });
   
-  const incoming = change.payload;
   const id = incoming.id;
   const current = store.inspections[id];
   
@@ -179,15 +179,14 @@ app.post('/api/sync', (req, res) => {
     return res.json({ ok: true, inspection: incoming });
   }
 
+  const baseVersion = change?.baseVersion ?? req.body?.baseVersion ?? (incoming.version - 1);
+  const incomingActor = change?.actor || req.body?.actor || actorOf(change) || actorOf({ payload: incoming });
   const currentActor = actorOf({ payload: current });
-  const incomingActor = actorOf(change);
   
   // REAL CONFLICT DETECTION:
   // If the client's baseVersion is less than the server's current version, 
   // AND the actors are different, it means the client made changes based on an outdated state.
-  const baseVersion = change.baseVersion;
-  
-  if (baseVersion < current.version && incomingActor !== currentActor) {
+  if (typeof baseVersion === 'number' && baseVersion < current.version && incomingActor !== currentActor) {
     const conflictId = randomUUID();
     store.conflicts[conflictId] = {
       id: conflictId,
@@ -487,12 +486,98 @@ function updateAnalysis(evidenceId, updateData) {
   return store.analyses[evidenceId];
 }
 
+// Helper to resolve evidence file path on server regardless of storage/ID mapping format
+function resolveEvidenceFile(id) {
+  if (!id) return null;
+
+  // 1. Direct match with id as filename in evidenceDir
+  const directPath = path.join(evidenceDir, id);
+  if (fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+    return { filePath: directPath, filename: id };
+  }
+
+  // 2. Check store.evidence[id]
+  const evRecord = store.evidence[id];
+  if (evRecord) {
+    if (evRecord.url) {
+      const urlFilename = path.basename(evRecord.url);
+      const urlPath = path.join(evidenceDir, urlFilename);
+      if (fs.existsSync(urlPath) && fs.statSync(urlPath).isFile()) {
+        return { filePath: urlPath, filename: urlFilename, record: evRecord };
+      }
+    }
+    if (evRecord.filename) {
+      const fnPath = path.join(evidenceDir, evRecord.filename);
+      if (fs.existsSync(fnPath) && fs.statSync(fnPath).isFile()) {
+        return { filePath: fnPath, filename: evRecord.filename, record: evRecord };
+      }
+    }
+  }
+
+  // 3. Scan store.inspections for matching evidence item id
+  for (const insp of Object.values(store.inspections || {})) {
+    const allEv = [
+      ...(insp.evidence || []),
+      ...(insp.checklist || []).flatMap(c => c.evidence || [])
+    ];
+    const match = allEv.find(e => e.id === id);
+    if (match) {
+      if (match.url) {
+        const uFn = path.basename(match.url);
+        const uPath = path.join(evidenceDir, uFn);
+        if (fs.existsSync(uPath) && fs.statSync(uPath).isFile()) {
+          return { filePath: uPath, filename: uFn, record: match };
+        }
+      }
+      if (match.filename) {
+        const fnPath = path.join(evidenceDir, match.filename);
+        if (fs.existsSync(fnPath) && fs.statSync(fnPath).isFile()) {
+          return { filePath: fnPath, filename: match.filename, record: match };
+        }
+      }
+    }
+  }
+
+  // 4. Look for file in evidenceDir starting with id (e.g. <id>.png, <id>.jpg, etc.)
+  if (fs.existsSync(evidenceDir)) {
+    const files = fs.readdirSync(evidenceDir);
+    const prefixMatch = files.find(f => f === id || f.startsWith(`${id}.`));
+    if (prefixMatch) {
+      const pPath = path.join(evidenceDir, prefixMatch);
+      if (fs.existsSync(pPath) && fs.statSync(pPath).isFile()) {
+        return { filePath: pPath, filename: prefixMatch };
+      }
+    }
+
+    // 5. Fallback: if evidenceDir has any file (e.g. single uploaded file on server)
+    if (files.length === 1) {
+      const sPath = path.join(evidenceDir, files[0]);
+      if (fs.existsSync(sPath) && fs.statSync(sPath).isFile()) {
+        return { filePath: sPath, filename: files[0] };
+      }
+    }
+  }
+
+  return null;
+}
+
+function getMimeType(filePath, evRecord = null) {
+  if (evRecord?.mimeType) return evRecord.mimeType;
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.png') return 'image/png';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.mp4') return 'video/mp4';
+  return 'image/jpeg';
+}
+
 // Media Analysis Endpoints
 app.post('/api/evidence/:id/analyze', (req, res) => {
   const id = req.params.id;
-  const filePath = path.join(evidenceDir, id);
+  const resolved = resolveEvidenceFile(id);
 
-  if (!fs.existsSync(filePath)) {
+  if (!resolved || !resolved.filePath) {
     const record = updateAnalysis(id, {
       status: 'failed',
       error: 'Evidence file not found on server'
@@ -525,16 +610,12 @@ app.post('/api/evidence/:id/analyze', (req, res) => {
     error: null
   });
 
-  const ext = path.extname(id).toLowerCase();
-  let mimeType = 'image/jpeg';
-  if (ext === '.png') mimeType = 'image/png';
-  else if (ext === '.webp') mimeType = 'image/webp';
-  else if (ext === '.gif') mimeType = 'image/gif';
+  const mimeType = getMimeType(resolved.filePath, resolved.record);
 
   // Trigger async background execution
   (async () => {
     try {
-      const result = await analyzeMediaWithGemini({ filePath, mimeType });
+      const result = await analyzeMediaWithGemini({ filePath: resolved.filePath, mimeType });
       if (result.success) {
         updateAnalysis(id, {
           status: 'complete',
@@ -596,12 +677,11 @@ app.get('/api/evidence/:id', (req, res) => {
   const ev = store.evidence[req.params.id];
   if (ev) return res.json(ev);
   
-  // Check disk if stored by filename
-  const diskPath = path.join(evidenceDir, req.params.id);
-  if (fs.existsSync(diskPath)) {
+  const resolved = resolveEvidenceFile(req.params.id);
+  if (resolved) {
     return res.json({
       id: req.params.id,
-      url: `/api/evidence/files/${req.params.id}`,
+      url: `/api/evidence/files/${resolved.filename}`,
       status: 'uploaded'
     });
   }
