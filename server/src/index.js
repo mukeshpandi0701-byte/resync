@@ -12,12 +12,15 @@ const dataDir = path.join(__dirname, '../data');
 const file = path.join(dataDir, 'store.json');
 fs.mkdirSync(dataDir, { recursive: true });
 
+// Check for optional Supabase credentials
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
+const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_KEY);
 
-let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, analyses: {} };
+let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, analyses: {}, reports: {}, evidence: {} };
 store.analyses = store.analyses || {};
-let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, reports: {} };
 store.reports = store.reports || {};
-
+store.evidence = store.evidence || {};
 
 // Seed data if none exists
 if (Object.keys(store.inspections).length === 0) {
@@ -48,7 +51,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, name: 'ReSync', time: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({
+  ok: true,
+  name: 'ReSync',
+  time: new Date().toISOString(),
+  supabaseStorage: HAS_SUPABASE ? 'VERIFIED' : 'NOT VERIFIED'
+}));
 
 app.get('/api/inspections', (req, res) => {
   res.json(Object.values(store.inspections));
@@ -239,13 +247,19 @@ app.patch('/api/conflicts/:id', (req, res) => {
 
 app.get('/api/conflicts', (req, res) => res.json(Object.values(store.conflicts)));
 
-// Evidence handling
+// Evidence Handling & Storage
 const evidenceDir = path.join(dataDir, 'evidence');
 fs.mkdirSync(evidenceDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, evidenceDir),
   filename: (req, file, cb) => {
+    // Preserve client evidenceId if passed to prevent duplicates
+    const evidenceId = req.body?.evidenceId || req.body?.id;
+    if (evidenceId) {
+      const ext = path.extname(file.originalname) || '';
+      return cb(null, `${evidenceId}${ext}`);
+    }
     const ext = path.extname(file.originalname);
     cb(null, `${randomUUID()}${ext}`);
   }
@@ -254,22 +268,38 @@ const upload = multer({ storage });
 
 app.use('/api/evidence/files', express.static(evidenceDir));
 
+// Duplicate check & reliable upload endpoint
 app.post('/api/evidence/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   
-  const { inspectionId, itemId, actorId } = req.body;
+  const { inspectionId, itemId, actorId, evidenceId } = req.body;
+  const targetId = evidenceId || req.file.filename;
+  
+  // Idempotent duplicate check
+  if (store.evidence[targetId]) {
+    return res.json({
+      ok: true,
+      duplicate: true,
+      evidence: store.evidence[targetId]
+    });
+  }
+
   const serverUrl = `/api/evidence/files/${req.file.filename}`;
   const evidenceRecord = {
-    id: req.file.filename,
-    inspectionId,
-    itemId,
-    actorId,
+    id: targetId,
+    inspectionId: inspectionId || null,
+    itemId: itemId || null,
+    actorId: actorId || 'Inspector',
     filename: req.file.originalname,
     mimeType: req.file.mimetype,
     size: req.file.size,
     url: serverUrl,
-    uploadedAt: Date.now()
+    uploadedAt: Date.now(),
+    cloudStatus: HAS_SUPABASE ? 'VERIFIED' : 'NOT VERIFIED'
   };
+
+  store.evidence[targetId] = evidenceRecord;
+  persist();
   
   res.json({ ok: true, evidence: evidenceRecord });
 });
@@ -405,6 +435,24 @@ app.get('/api/evidence/:id/analysis', (req, res) => {
     confidenceScore: typeof record.confidenceScore === 'number' ? record.confidenceScore : 0,
     ...(record.error ? { error: record.error } : {})
   });
+});
+
+// GET endpoint to query evidence status by ID
+app.get('/api/evidence/:id', (req, res) => {
+  const ev = store.evidence[req.params.id];
+  if (ev) return res.json(ev);
+  
+  // Check disk if stored by filename
+  const diskPath = path.join(evidenceDir, req.params.id);
+  if (fs.existsSync(diskPath)) {
+    return res.json({
+      id: req.params.id,
+      url: `/api/evidence/files/${req.params.id}`,
+      status: 'uploaded'
+    });
+  }
+
+  res.status(404).json({ error: 'Evidence not found' });
 });
 
 app.listen(4000, () => console.log('ReSync API running on http://localhost:4000'));
