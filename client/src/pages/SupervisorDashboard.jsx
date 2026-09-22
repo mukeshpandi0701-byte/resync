@@ -7,7 +7,7 @@ const API = 'http://localhost:4000/api';
 export default function SupervisorDashboard() {
   const [conflicts, setConflicts] = useState([]);
   const [inspections, setInspections] = useState([]);
-  const [stats, setStats] = useState({ total: 0, completed: 0, inProgress: 0 });
+  const [stats, setStats] = useState({ total: 0, completed: 0, inProgress: 0, reinspections: 0 });
 
   useEffect(() => {
     const fetchDashboard = async () => {
@@ -26,6 +26,7 @@ export default function SupervisorDashboard() {
             total: insData.length,
             completed: insData.filter(i => i.status === 'completed').length,
             inProgress: insData.filter(i => i.status === 'assigned' || i.status === 'in_progress').length,
+            reinspections: insData.filter(i => i.status === 'reinspection_requested').length,
           });
         }
       } catch (e) {
@@ -46,7 +47,7 @@ export default function SupervisorDashboard() {
         </div>
       </section>
       
-      <div className="grid">
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         <section className="card metric-card">
           <h2><Activity /> Total Inspections</h2>
           <div className="metric"><b>{stats.total}</b><span>Total</span></div>
@@ -54,6 +55,10 @@ export default function SupervisorDashboard() {
         <section className="card metric-card">
           <h2>In Progress</h2>
           <div className="metric"><b>{stats.inProgress}</b><span>Active</span></div>
+        </section>
+        <section className="card metric-card">
+          <h2>Re-inspections</h2>
+          <div className="metric"><b style={{color: '#F59E0B'}}>{stats.reinspections}</b><span>Requested</span></div>
         </section>
         <section className="card metric-card">
           <h2>Conflicts</h2>
