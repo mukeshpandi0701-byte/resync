@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useContext, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { RefreshCw, ClipboardCheck, CloudOff, Camera, History, Upload, CheckCircle2, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { RefreshCw, ClipboardCheck, CloudOff, Camera, History, Upload, CheckCircle2, ShieldCheck, RotateCcw, AlertTriangle } from 'lucide-react';
 import { db } from '../db';
 import { AppContext } from '../App';
 
@@ -31,6 +31,8 @@ export default function InspectionDetail() {
     if (!file) return;
     
     const evId = crypto.randomUUID();
+    
+    // Store raw Blob safely in local Dexie database first (offline-first persistence)
     await db.evidence.put({
       id: evId,
       inspectionId: inspection.id,
@@ -48,35 +50,73 @@ export default function InspectionDetail() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
+  async function retryEvidence(evId) {
+    // Reset status to pending in local Dexie store without losing local Blob
+    await db.evidence.update(evId, { status: 'pending' });
+    setInspection(prev => {
+      if (!prev) return prev;
+      const updatedEvidence = (prev.evidence || []).map(e => e.id === evId ? { ...e, status: 'pending' } : e);
+      const next = { ...prev, evidence: updatedEvidence };
+      db.inspections.put(next);
+      return next;
+    });
+    setMessage('Retrying evidence upload…');
+    if (online) sync();
+  }
+
   async function syncEvidence() {
     try {
+      // Fetch evidence items queued for upload (status: pending)
       const pendingEv = await db.evidence.where('status').equals('pending').toArray();
       for (const ev of pendingEv) {
+        if (!ev.blob) continue; // Safety check
+        
         const formData = new FormData();
         formData.append('file', ev.blob, ev.filename);
         formData.append('inspectionId', ev.inspectionId);
         formData.append('actorId', ev.actorId);
+        formData.append('evidenceId', ev.id); // Prevent duplicate generation on server
         
-        const r = await fetch(API + '/evidence/upload', { method: 'POST', body: formData });
-        const data = await r.json();
-        
-        if (data.ok) {
-          await db.evidence.update(ev.id, { status: 'uploaded', serverUrl: data.evidence.url });
+        try {
+          const r = await fetch(API + '/evidence/upload', { method: 'POST', body: formData });
+          const data = await r.json();
           
-          // Update the local inspection metadata to show uploaded
+          if (r.ok && data.ok) {
+            await db.evidence.update(ev.id, { status: 'uploaded', serverUrl: data.evidence.url });
+            
+            // Update local inspection evidence reference status to uploaded
+            setInspection(prev => {
+              if (!prev) return prev;
+              const updatedEvidence = (prev.evidence || []).map(e => e.id === ev.id ? { ...e, status: 'uploaded' } : e);
+              const next = { ...prev, evidence: updatedEvidence };
+              db.inspections.put(next);
+              return next;
+            });
+          } else {
+            // Server error — mark failed in Dexie (Blob remains preserved)
+            await db.evidence.update(ev.id, { status: 'failed' });
+            setInspection(prev => {
+              if (!prev) return prev;
+              const updatedEvidence = (prev.evidence || []).map(e => e.id === ev.id ? { ...e, status: 'failed' } : e);
+              const next = { ...prev, evidence: updatedEvidence };
+              db.inspections.put(next);
+              return next;
+            });
+          }
+        } catch (uploadErr) {
+          // Network error — mark status failed without dropping local Blob
+          await db.evidence.update(ev.id, { status: 'failed' });
           setInspection(prev => {
             if (!prev) return prev;
-            const updatedEvidence = prev.evidence.map(e => e.id === ev.id ? { ...e, status: 'uploaded' } : e);
+            const updatedEvidence = (prev.evidence || []).map(e => e.id === ev.id ? { ...e, status: 'failed' } : e);
             const next = { ...prev, evidence: updatedEvidence };
             db.inspections.put(next);
             return next;
           });
-        } else {
-          await db.evidence.update(ev.id, { status: 'failed' });
         }
       }
     } catch (e) {
-      console.error('Evidence sync failed', e);
+      console.error('Evidence sync queue error', e);
     }
   }
 
@@ -94,12 +134,12 @@ export default function InspectionDetail() {
     setInspection(withHistory);
     await db.inspections.put(withHistory);
     
-    // Create change record. Base version is the original version we started with (next.version)
+    // Create change record. Base version is original version before edit (for conflict detection)
     await db.changes.add({
       id: crypto.randomUUID(),
       inspectionId: withHistory.id,
       payload: withHistory,
-      baseVersion: next.version, // Extremely important for conflict detection
+      baseVersion: next.version,
       status: 'pending',
       createdAt: Date.now(),
       actor
@@ -207,14 +247,29 @@ export default function InspectionDetail() {
 
           <section className="card">
             <h2><Camera /> Evidence</h2>
-            <input type="file" ref={fileInputRef} style={{display:'none'}} onChange={handleFileSelect} />
+            <input 
+              type="file" 
+              accept="image/*,video/*" 
+              capture="environment" 
+              ref={fileInputRef} 
+              style={{display:'none'}} 
+              onChange={handleFileSelect} 
+            />
             <button className="upload" onClick={() => fileInputRef.current?.click()}>
               <Upload size={16} /> Add photo evidence
             </button>
-            <p className="tiny">Photos are stored offline and uploaded during sync.</p>
+            <p className="tiny">Photos are stored offline in local storage and synced automatically.</p>
             {inspection.evidence.map(e => (
-              <div key={e.id} style={{ fontSize: '12px', marginTop: '4px', color: '#B1A8C2' }}>
-                📎 {e.filename} ({e.status})
+              <div key={e.id} style={{ fontSize: '12px', marginTop: '6px', color: '#B1A8C2', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>📎 {e.filename} <small style={{ color: e.status === 'uploaded' ? '#86efac' : (e.status === 'failed' ? '#fca5a5' : '#fde047') }}>({e.status})</small></span>
+                {e.status === 'failed' && (
+                  <button 
+                    onClick={() => retryEvidence(e.id)} 
+                    style={{ border: '0', background: '#291519', color: '#fca5a5', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontSize: '10px', display: 'flex', alignItems: 'center', gap: '3px' }}
+                  >
+                    <RotateCcw size={10} /> Retry
+                  </button>
+                )}
               </div>
             ))}
           </section>
