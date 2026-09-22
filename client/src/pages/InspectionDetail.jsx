@@ -13,7 +13,47 @@ export default function InspectionDetail() {
   const [inspection, setInspection] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState('');
-  
+  const [reportFormat, setReportFormat] = useState('JSON');
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const [reportStatus, setReportStatus] = useState('');
+  const [latestReport, setLatestReport] = useState(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+
+  async function handleGenerateReport() {
+    if (!inspection) return;
+    setGeneratingReport(true);
+    setReportStatus('Requesting report generation…');
+    try {
+      const res = await fetch(API + '/reports/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inspectionId: inspection.id, format: reportFormat })
+      });
+      const data = await res.json();
+      if ((res.status === 202 || res.status === 200) && data.ok) {
+        const reportRes = await fetch(API + '/reports/' + (data.jobId || data.id));
+        if (reportRes.ok) {
+          const reportDetails = await reportRes.json();
+          setLatestReport(reportDetails);
+          setReportStatus(
+            reportDetails.status?.includes('NOT VERIFIED')
+              ? 'PDF format: NOT VERIFIED (PDF engine not available in environment)'
+              : 'Report generated successfully'
+          );
+        } else {
+          setLatestReport(data);
+          setReportStatus('Report job created (' + data.status + ')');
+        }
+      } else {
+        setReportStatus(data.error || 'Failed to generate report');
+      }
+    } catch (err) {
+      setReportStatus('Report request failed (server unreachable)');
+    } finally {
+      setGeneratingReport(false);
+    }
+  }
+
   useEffect(() => {
     const load = async () => {
       const ins = await db.inspections.get(id);
@@ -201,8 +241,120 @@ export default function InspectionDetail() {
           <section className="card">
             <h2><History /> Inspection state</h2>
             <div className="metric"><b>{inspection.version}</b><span>Local version</span></div>
-            <div className="metric"><b>{inspection.history.length}</b><span>Audit events</span></div>
-            <div className="metric"><b>{inspection.evidence.length}</b><span>Evidence items</span></div>
+            <div className="metric"><b>{inspection.history?.length || 0}</b><span>Audit events</span></div>
+            <div className="metric"><b>{inspection.evidence?.length || 0}</b><span>Evidence items</span></div>
+
+            {/* Audit History Timeline */}
+            <div style={{ marginTop: '16px', borderTop: '1px solid #292031', paddingTop: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#f8fafc' }}>Audit History</span>
+                <span className="tiny muted">{inspection.history?.length || 0} events</span>
+              </div>
+              <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {(inspection.history || [])
+                  .slice()
+                  .sort((a, b) => a.at - b.at)
+                  .map((evt, idx) => {
+                    const isConflict = evt.action?.includes('conflict') || evt.action?.includes('reinspection');
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          background: isConflict ? '#291519' : '#100a17',
+                          border: isConflict ? '1px solid #EF4444' : '1px solid #292031',
+                          fontSize: '12px'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                          <span style={{ fontWeight: 'bold', color: isConflict ? '#fca5a5' : '#f8fafc' }}>
+                            {evt.actor || 'Inspector'}
+                          </span>
+                          <span style={{ fontSize: '10px', color: isConflict ? '#F59E0B' : '#B1A8C2', border: '1px solid #3a2b4e', borderRadius: '4px', padding: '1px 5px' }}>
+                            v{evt.version}
+                          </span>
+                        </div>
+                        <div style={{ color: '#f8fafc', marginBottom: '4px', wordBreak: 'break-word' }}>
+                          {evt.action}
+                        </div>
+                        <div style={{ fontSize: '10px', color: '#a99db9' }}>
+                          {new Date(evt.at).toLocaleString()}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Report Request Controls */}
+            <div style={{ marginTop: '16px', borderTop: '1px solid #292031', paddingTop: '12px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#f8fafc', display: 'block', marginBottom: '8px' }}>
+                Inspection Report
+              </span>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+                <select
+                  value={reportFormat}
+                  onChange={e => setReportFormat(e.target.value)}
+                  style={{
+                    background: '#0d0814',
+                    color: '#f8fafc',
+                    border: '1px solid #30243d',
+                    borderRadius: '8px',
+                    padding: '8px 10px',
+                    fontSize: '12px',
+                    outline: 'none',
+                    flex: '1'
+                  }}
+                >
+                  <option value="JSON">JSON (Supported)</option>
+                  <option value="PDF">PDF (NOT VERIFIED)</option>
+                </select>
+                <button
+                  className="upload"
+                  style={{ width: 'auto', padding: '8px 14px', fontSize: '12px' }}
+                  disabled={generatingReport}
+                  onClick={handleGenerateReport}
+                >
+                  {generatingReport ? 'Generating…' : 'Generate'}
+                </button>
+              </div>
+
+              {reportStatus && (
+                <div style={{ fontSize: '11px', color: reportStatus.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac', marginBottom: '6px' }}>
+                  {reportStatus}
+                </div>
+              )}
+
+              {latestReport && (
+                <div style={{ padding: '8px 10px', background: '#100a17', border: '1px solid #292031', borderRadius: '8px', fontSize: '12px', marginTop: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <span style={{ color: '#f8fafc', fontWeight: 'bold' }}>Report #{latestReport.id.slice(0, 8)}</span>
+                    <span style={{ color: latestReport.status?.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac', fontSize: '11px' }}>
+                      {latestReport.format}
+                    </span>
+                  </div>
+                  <div style={{ color: '#a99db9', fontSize: '10px', marginBottom: '6px' }}>
+                    {new Date(latestReport.generatedAt).toLocaleString()}
+                  </div>
+                  <button
+                    style={{
+                      background: '#241537',
+                      border: '1px solid #4b3565',
+                      color: '#f8fafc',
+                      borderRadius: '6px',
+                      padding: '5px 10px',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                      width: '100%'
+                    }}
+                    onClick={() => setShowReportModal(true)}
+                  >
+                    View Report Metadata & Data
+                  </button>
+                </div>
+              )}
+            </div>
           </section>
 
           <section className="card">
@@ -212,7 +364,7 @@ export default function InspectionDetail() {
               <Upload size={16} /> Add photo evidence
             </button>
             <p className="tiny">Photos are stored offline and uploaded during sync.</p>
-            {inspection.evidence.map(e => (
+            {inspection.evidence?.map(e => (
               <div key={e.id} style={{ fontSize: '12px', marginTop: '4px', color: '#B1A8C2' }}>
                 📎 {e.filename} ({e.status})
               </div>
@@ -235,6 +387,43 @@ export default function InspectionDetail() {
           </button>
         </div>
       </section>
+
+      {showReportModal && latestReport && (
+        <div className="overlay" onClick={() => setShowReportModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxHeight: '85vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <h2>Inspection Report ({latestReport.format})</h2>
+              <button
+                style={{ background: 'transparent', border: 0, color: '#f8fafc', fontSize: '18px', cursor: 'pointer' }}
+                onClick={() => setShowReportModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="tiny" style={{ color: latestReport.status?.includes('NOT VERIFIED') ? '#F59E0B' : '#86efac' }}>
+              Status: {latestReport.status}
+            </p>
+            <p className="tiny muted">
+              Generated: {new Date(latestReport.generatedAt).toLocaleString()} • Inspection ID: {latestReport.inspectionId}
+            </p>
+            <pre style={{
+              background: '#0d0814',
+              padding: '12px',
+              borderRadius: '8px',
+              border: '1px solid #30243d',
+              color: '#f8fafc',
+              fontSize: '11px',
+              overflowX: 'auto',
+              maxHeight: '350px'
+            }}>
+              {JSON.stringify(latestReport.data || latestReport, null, 2)}
+            </pre>
+            <div className="actions" style={{ marginTop: '16px', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowReportModal(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

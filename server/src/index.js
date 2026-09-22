@@ -11,7 +11,8 @@ const dataDir = path.join(__dirname, '../data');
 const file = path.join(dataDir, 'store.json');
 fs.mkdirSync(dataDir, { recursive: true });
 
-let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {} };
+let store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { inspections: {}, conflicts: {}, reports: {} };
+store.reports = store.reports || {};
 
 // Seed data if none exists
 if (Object.keys(store.inspections).length === 0) {
@@ -50,6 +51,105 @@ app.get('/api/inspections', (req, res) => {
 
 app.get('/api/inspections/:id', (req, res) => {
   res.json(store.inspections[req.params.id] || null);
+});
+
+app.get('/api/inspections/:id/audit', (req, res) => {
+  const inspection = store.inspections[req.params.id];
+  if (!inspection) return res.status(404).json({ error: 'Inspection not found' });
+  const events = inspection.history || [];
+  res.json({ events, total: events.length });
+});
+
+app.post('/api/reports/generate', (req, res) => {
+  const { inspectionId, format = 'JSON' } = req.body || {};
+  if (!inspectionId) return res.status(400).json({ error: 'inspectionId is required' });
+
+  const inspection = store.inspections[inspectionId];
+  if (!inspection) return res.status(404).json({ error: 'Inspection not found' });
+
+  const reportId = randomUUID();
+  const generatedAt = Date.now();
+  const normFormat = (typeof format === 'string' && format.toUpperCase() === 'PDF') ? 'PDF' : 'JSON';
+
+  // Aggregate actual inspection data
+  const checklist = inspection.checklist || [];
+  const passCount = checklist.filter(c => c.value === 'PASS').length;
+  const failCount = checklist.filter(c => c.value === 'FAIL').length;
+  const pendingCount = checklist.filter(c => !c.value || c.value === 'PENDING').length;
+
+  // Extract actual media analysis if present on evidence or checklist items, otherwise null
+  const mediaAnalysisEntries = (inspection.evidence || [])
+    .filter(e => e.analysis || e.analysisStatus)
+    .map(e => ({
+      evidenceId: e.id,
+      analysisStatus: e.analysisStatus || null,
+      analysis: e.analysis || null
+    }));
+  const mediaAnalysis = mediaAnalysisEntries.length > 0 ? mediaAnalysisEntries : null;
+
+  const reportData = {
+    inspection: {
+      id: inspection.id,
+      title: inspection.title,
+      site: inspection.site,
+      status: inspection.status,
+      version: inspection.version,
+      updatedAt: inspection.updatedAt
+    },
+    summary: {
+      totalItems: checklist.length,
+      passed: passCount,
+      failed: failCount,
+      pending: pendingCount
+    },
+    checklist,
+    notes: inspection.notes || '',
+    evidence: inspection.evidence || [],
+    mediaAnalysis,
+    history: inspection.history || []
+  };
+
+  const status = normFormat === 'PDF' 
+    ? 'NOT VERIFIED (PDF engine not available in environment)' 
+    : 'completed';
+
+  const reportRecord = {
+    id: reportId,
+    inspectionId,
+    format: normFormat,
+    url: `/api/reports/${reportId}`,
+    generatedAt,
+    status,
+    data: reportData
+  };
+
+  store.reports[reportId] = reportRecord;
+  persist();
+
+  res.status(202).json({
+    ok: true,
+    jobId: reportId,
+    id: reportId,
+    inspectionId,
+    url: `/api/reports/${reportId}`,
+    format: normFormat,
+    status,
+    generatedAt
+  });
+});
+
+app.get('/api/reports/:id', (req, res) => {
+  const report = store.reports?.[req.params.id];
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  res.json({
+    id: report.id,
+    inspectionId: report.inspectionId,
+    format: report.format,
+    url: report.url,
+    generatedAt: report.generatedAt,
+    status: report.status,
+    data: report.data
+  });
 });
 
 app.post('/api/sync', (req, res) => {
