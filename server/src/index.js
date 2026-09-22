@@ -197,6 +197,17 @@ app.post('/api/sync', (req, res) => {
       status: 'pending',
       createdAt: Date.now()
     };
+    
+    current.history = [
+      ...(current.history || []),
+      {
+        at: Date.now(),
+        action: 'conflict_created',
+        actor: 'System',
+        conflictId,
+        version: current.version
+      }
+    ];
     persist();
     return res.json({
       conflict: true,
@@ -208,6 +219,15 @@ app.post('/api/sync', (req, res) => {
 
   // If no conflict, accept the change (either newer version or same actor overwriting own change sequentially)
   if (incoming.version > current.version || (incoming.version === current.version && incomingActor === currentActor)) {
+    incoming.history = [
+      ...(incoming.history || []),
+      {
+        at: Date.now(),
+        action: 'sync_completed',
+        actor: incomingActor,
+        version: incoming.version
+      }
+    ];
     store.inspections[id] = incoming;
     persist();
   }
@@ -215,34 +235,164 @@ app.post('/api/sync', (req, res) => {
   res.json({ ok: true, inspection: store.inspections[id] });
 });
 
+app.post('/api/inspections/:id/reinspect', (req, res) => {
+  const original = store.inspections[req.params.id];
+  if (!original) return res.status(404).json({ error: 'Inspection not found' });
+
+  const actorName = req.body?.actor || 'Supervisor';
+  const newId = `ins-${randomUUID().slice(0, 8)}`;
+  
+  const reinspection = {
+    id: newId,
+    parentInspectionId: original.id,
+    title: original.title ? (original.title.includes('Re-inspection') ? original.title : `${original.title} (Re-inspection)`) : 'Re-inspection',
+    site: original.site || '',
+    status: 'assigned',
+    version: 1,
+    updatedAt: Date.now(),
+    checklist: (original.checklist || []).map(item => ({
+      id: item.id,
+      label: item.label,
+      value: 'PENDING',
+      notes: '',
+      evidence: []
+    })),
+    notes: '',
+    evidence: [],
+    history: [
+      {
+        at: Date.now(),
+        action: 'reinspection_created',
+        actor: actorName,
+        version: 1,
+        parentInspectionId: original.id
+      }
+    ]
+  };
+
+  original.status = 'reinspection_requested';
+  original.version = (original.version || 1) + 1;
+  original.history = [
+    ...(original.history || []),
+    {
+      at: Date.now(),
+      action: 'reinspection_requested',
+      actor: actorName,
+      version: original.version,
+      reinspectionId: newId
+    }
+  ];
+
+  store.inspections[newId] = reinspection;
+  store.inspections[original.id] = original;
+  persist();
+
+  res.status(201).json({
+    ok: true,
+    newInspectionId: newId,
+    reinspection,
+    original
+  });
+});
+
 app.patch('/api/conflicts/:id', (req, res) => {
   const c = store.conflicts[req.params.id];
   if (!c) return res.status(404).json({ error: 'Conflict not found' });
   
   const d = req.body?.decision;
-  let chosen = d === 'keep_server' ? c.server : (d === 'reinspect' ? { ...c.server, status: 'reinspection_requested' } : c.client);
-  
-  chosen = {
-    ...chosen,
-    version: Math.max(c.server.version, c.client.version) + 1,
-    history: [
-      ...(chosen.history || []),
-      {
-        at: Date.now(),
-        action: d === 'reinspect' ? 'supervisor_requested_reinspection' : `supervisor_resolved_conflict_${d}`,
-        actor: req.body?.actor || 'Supervisor',
-        version: Math.max(c.server.version, c.client.version) + 1
-      }
-    ]
-  };
-  
+  const actorName = req.body?.actor || 'Supervisor';
+  let chosen;
+  let reinspection = null;
+
+  if (d === 'keep_server') {
+    chosen = {
+      ...c.server,
+      version: Math.max(c.server.version, c.client.version) + 1,
+      history: [
+        ...(c.server.history || []),
+        {
+          at: Date.now(),
+          action: 'conflict_resolved',
+          subAction: 'conflict_keep_server',
+          actor: actorName,
+          version: Math.max(c.server.version, c.client.version) + 1
+        }
+      ]
+    };
+  } else if (d === 'keep_client') {
+    chosen = {
+      ...c.client,
+      version: Math.max(c.server.version, c.client.version) + 1,
+      history: [
+        ...(c.client.history || []),
+        {
+          at: Date.now(),
+          action: 'conflict_resolved',
+          subAction: 'conflict_keep_client',
+          actor: actorName,
+          version: Math.max(c.server.version, c.client.version) + 1
+        }
+      ]
+    };
+  } else if (d === 'reinspect') {
+    const original = c.server;
+    const newId = `ins-${randomUUID().slice(0, 8)}`;
+    reinspection = {
+      id: newId,
+      parentInspectionId: c.inspectionId,
+      title: original.title ? (original.title.includes('Re-inspection') ? original.title : `${original.title} (Re-inspection)`) : 'Re-inspection',
+      site: original.site || '',
+      status: 'assigned',
+      version: 1,
+      updatedAt: Date.now(),
+      checklist: (original.checklist || []).map(item => ({
+        id: item.id,
+        label: item.label,
+        value: 'PENDING',
+        notes: '',
+        evidence: []
+      })),
+      notes: '',
+      evidence: [],
+      history: [
+        {
+          at: Date.now(),
+          action: 'reinspection_created',
+          actor: actorName,
+          version: 1,
+          parentInspectionId: c.inspectionId
+        }
+      ]
+    };
+    store.inspections[newId] = reinspection;
+
+    chosen = {
+      ...c.server,
+      status: 'reinspection_requested',
+      version: Math.max(c.server.version, c.client.version) + 1,
+      history: [
+        ...(c.server.history || []),
+        {
+          at: Date.now(),
+          action: 'reinspection_requested',
+          subAction: 'conflict_reinspect',
+          actor: actorName,
+          version: Math.max(c.server.version, c.client.version) + 1,
+          reinspectionId: newId
+        }
+      ]
+    };
+  } else {
+    return res.status(400).json({ error: 'Invalid resolution decision' });
+  }
+
   store.inspections[c.inspectionId] = chosen;
   c.status = 'resolved';
   c.resolution = d;
   c.resolvedAt = Date.now();
   persist();
-  
-  res.json({ ok: true, inspection: chosen });
+
+  res.json({ ok: true, inspection: chosen, ...(reinspection ? { reinspection } : {}) });
 });
 
 app.get('/api/conflicts', (req, res) => res.json(Object.values(store.conflicts)));
@@ -435,6 +585,10 @@ app.get('/api/evidence/:id/analysis', (req, res) => {
     confidenceScore: typeof record.confidenceScore === 'number' ? record.confidenceScore : 0,
     ...(record.error ? { error: record.error } : {})
   });
+});
+
+app.get('/api/evidence/analyses', (req, res) => {
+  res.json(Object.values(store.analyses || {}));
 });
 
 // GET endpoint to query evidence status by ID
